@@ -4,7 +4,7 @@ use std::{
     num::NonZeroU32,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -79,6 +79,10 @@ struct NodeStateInner {
     recovered_height: AtomicU64,
     /// Highest block height that has been fully verified via execution.
     last_verified_height: AtomicU64,
+    /// Set to `true` by the stall detector when no blocks have been
+    /// finalized for longer than the stall threshold. Cleared when
+    /// finalization resumes.
+    is_degraded: AtomicBool,
 }
 
 impl NodeState {
@@ -122,6 +126,7 @@ impl NodeState {
                 is_leader: RwLock::new(false),
                 recovered_height: AtomicU64::new(0),
                 last_verified_height: AtomicU64::new(0),
+                is_degraded: AtomicBool::new(false),
             }),
         }
     }
@@ -132,6 +137,11 @@ impl NodeState {
         let leader_index = (view % u64::from(self.inner.validator_count.get())) as u32;
         let is_leader = leader_index == self.inner.validator_index;
         *self.inner.is_leader.write() = is_leader;
+    }
+
+    /// Return the current consensus view.
+    pub fn view(&self) -> u64 {
+        self.inner.current_view.load(Ordering::Relaxed)
     }
 
     /// Increment finalized block count.
@@ -195,6 +205,24 @@ impl NodeState {
         self.inner.last_verified_height.load(Ordering::Relaxed)
     }
 
+    /// Mark the node as degraded (consensus stalled) or healthy.
+    ///
+    /// Called by `spawn_stall_detector` when the finalized block count
+    /// has not advanced for longer than the stall threshold, and cleared
+    /// when finalization resumes.
+    pub fn set_degraded(&self, degraded: bool) {
+        self.inner.is_degraded.store(degraded, Ordering::Relaxed);
+    }
+
+    /// Returns `true` when the stall detector has flagged the node as degraded.
+    ///
+    /// The `/health` endpoint returns `503 Service Unavailable` when this is
+    /// `true`, enabling load balancers and Docker healthchecks to detect
+    /// consensus stalls automatically.
+    pub fn is_degraded(&self) -> bool {
+        self.inner.is_degraded.load(Ordering::Relaxed)
+    }
+
     /// Returns `true` when the node is catching up after recovery.
     ///
     /// A node is catching up when it was recovered from an archive
@@ -228,6 +256,7 @@ impl NodeState {
             total_expected_peers,
             partition_status,
             is_leader: *self.inner.is_leader.read(),
+            is_degraded: self.inner.is_degraded.load(Ordering::Relaxed),
         }
     }
 }
@@ -260,6 +289,10 @@ pub struct NodeStatus {
     pub partition_status: PartitionStatus,
     /// Whether this node is the current leader.
     pub is_leader: bool,
+    /// Whether the stall detector has flagged this node as degraded.
+    ///
+    /// The `/health` endpoint returns `503 Service Unavailable` when `true`.
+    pub is_degraded: bool,
 }
 
 #[cfg(test)]
@@ -281,6 +314,7 @@ mod tests {
             total_expected_peers: 3,
             partition_status: PartitionStatus::Healthy,
             is_leader: true,
+            is_degraded: false,
         };
 
         let json = serde_json::to_string(&status).unwrap();
@@ -315,6 +349,7 @@ mod tests {
             total_expected_peers: 3,
             partition_status: PartitionStatus::Partitioned,
             is_leader: false,
+            is_degraded: false,
         };
 
         let json = serde_json::to_string(&status).unwrap();
@@ -330,6 +365,7 @@ mod tests {
         assert!(json.contains("totalExpectedPeers"));
         assert!(json.contains("partitionStatus"));
         assert!(json.contains("isLeader"));
+        assert!(json.contains("isDegraded"));
     }
 
     #[test]
@@ -551,5 +587,30 @@ mod tests {
         // Can advance
         state.set_last_verified_height(200);
         assert_eq!(state.last_verified_height(), 200);
+    }
+
+    #[test]
+    fn node_state_not_degraded_by_default() {
+        let state = NodeState::new(1, 0);
+        assert!(!state.is_degraded());
+        assert!(!state.status().is_degraded);
+    }
+
+    #[test]
+    fn node_state_set_degraded_true() {
+        let state = NodeState::new(1, 0);
+        state.set_degraded(true);
+        assert!(state.is_degraded());
+        assert!(state.status().is_degraded);
+    }
+
+    #[test]
+    fn node_state_set_degraded_clears() {
+        let state = NodeState::new(1, 0);
+        state.set_degraded(true);
+        assert!(state.is_degraded());
+        state.set_degraded(false);
+        assert!(!state.is_degraded());
+        assert!(!state.status().is_degraded);
     }
 }
