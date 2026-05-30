@@ -3,6 +3,7 @@
 - name: Deploy devnet
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   roles:
     - role: sync
       tags: [sync]

@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use clap::{Parser, Subcommand};
 use commonware_runtime::Supervisor as _;
@@ -182,17 +182,7 @@ impl Cli {
                 "Loaded bootstrap peers from peers.json"
             );
 
-            // Cross-validate: DKG participant count must match peers.json
-            let dkg_n = dkg_output.participants;
-            let peers_n = peers.participants.len();
-            if dkg_n != peers_n {
-                return Err(eyre::eyre!(
-                    "DKG output has {} participants but peers.json has {} participants. \
-                     Ensure both files are from the same DKG ceremony.",
-                    dkg_n,
-                    peers_n
-                ));
-            }
+            validate_dkg_participants(&dkg_output, &peers)?;
 
             secondary_participants = peers.secondary_participants;
         }
@@ -402,6 +392,38 @@ fn format_bootstrappers(
         .iter()
         .map(|(pk, addr)| format!("{}@{}", hex::encode(pk.as_ref()), addr))
         .collect()
+}
+
+fn validate_dkg_participants(
+    dkg_output: &kora_dkg::DkgOutput,
+    peers: &PeersInfo,
+) -> eyre::Result<()> {
+    let dkg_n = dkg_output.participants;
+    let peers_n = peers.participants.len();
+    if dkg_n != peers_n {
+        return Err(eyre::eyre!(
+            "DKG output has {} participants but peers.json has {} participants. \
+             Ensure both files are from the same DKG ceremony.",
+            dkg_n,
+            peers_n
+        ));
+    }
+
+    // Old output.json files may not include participant_keys. When present,
+    // require exact set equality, not just matching cardinality.
+    if !dkg_output.participant_keys.is_empty() {
+        let dkg_keys = dkg_output.participant_keys.iter().cloned().collect::<BTreeSet<_>>();
+        let peer_keys =
+            peers.participants.iter().map(|pk| pk.as_ref().to_vec()).collect::<BTreeSet<_>>();
+        if dkg_keys != peer_keys {
+            return Err(eyre::eyre!(
+                "DKG output participant keys do not match peers.json participants. \
+                 Ensure both files are from the same DKG ceremony."
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Load peers configuration from a JSON file.

@@ -6,6 +6,7 @@
 - name: Reset devnet
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   pre_tasks:
     - name: Require explicit confirmation for destructive reset
       ansible.builtin.fail:

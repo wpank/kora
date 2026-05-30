@@ -12,6 +12,7 @@
 - name: Query Prometheus metrics
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   vars:
     prom: "http://localhost:{{ prometheus_port }}"
     # Default queries to run (override with -e promql="...")

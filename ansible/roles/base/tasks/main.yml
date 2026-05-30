@@ -26,8 +26,32 @@
     enabled: true
     state: started
 
+- name: Ensure Docker group exists before assigning kora user
+  ansible.builtin.group:
+    name: docker
+    state: present
+    system: true
+
+- name: Create kora service group
+  ansible.builtin.group:
+    name: "{{ kora_user }}"
+    state: present
+
+- name: Create kora service user
+  ansible.builtin.user:
+    name: "{{ kora_user }}"
+    group: "{{ kora_user }}"
+    groups: docker
+    append: true
+    shell: /bin/bash
+    home: "/home/{{ kora_user }}"
+    create_home: true
+    state: present
+
 - name: Create project directory
   ansible.builtin.file:
     path: "{{ remote_project_dir }}"
     state: directory
+    owner: "{{ kora_user }}"
+    group: "{{ kora_user }}"
     mode: "0755"

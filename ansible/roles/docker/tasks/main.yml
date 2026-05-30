@@ -31,11 +31,15 @@
   ansible.builtin.command:
     cmd: docker buildx inspect kora-builder
   register: builder_check
+  become: true
+  become_user: "{{ kora_user }}"
   changed_when: false
   failed_when: false
 
 - name: Create buildx builder with host networking
   ansible.builtin.command:
     cmd: docker buildx create --name kora-builder --use --driver docker-container --driver-opt network=host
+  become: true
+  become_user: "{{ kora_user }}"
   when: builder_check.rc != 0
   changed_when: true

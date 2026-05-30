@@ -218,8 +218,8 @@ validators.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GF_SECURITY_ADMIN_USER` | admin | Grafana admin username |
-| `GF_SECURITY_ADMIN_PASSWORD` | admin | Grafana admin password |
-| `GF_AUTH_ANONYMOUS_ENABLED` | true | Allow anonymous access |
+| `GF_SECURITY_ADMIN_PASSWORD` | unset | Required non-default Grafana admin password |
+| `GF_AUTH_ANONYMOUS_ENABLED` | false | Allow anonymous access |
 | `GF_AUTH_ANONYMOUS_ORG_ROLE` | Viewer | Anonymous user role |
 
 ## Directory Structure

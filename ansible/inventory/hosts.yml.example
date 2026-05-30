@@ -8,13 +8,15 @@
 #   - SSH key-based authentication
 #   - hosts.yml is gitignored to protect server IPs
 #
-# Security: use a dedicated deploy user with limited sudo instead of root.
-# See provision.yml for setting up the kora-deploy user.
+# For first-time provisioning on a fresh Hetzner host, root SSH is expected.
+# Provisioning creates the non-root kora service user used by deploy/operate
+# playbooks. After bootstrapping, you may switch ansible_user to a separate
+# pre-created sudo-capable login user if your host policy requires it.
 all:
   children:
     devnet:
       hosts:
         hetzner-devnet:
           ansible_host: YOUR_SERVER_IP
-          ansible_user: kora-deploy
+          ansible_user: root
           ansible_python_interpreter: /usr/bin/python3
