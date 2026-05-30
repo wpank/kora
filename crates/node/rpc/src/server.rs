@@ -270,6 +270,8 @@ struct RateLimitedRpcService<S> {
     global_limiter: Option<SharedRateLimiter>,
     /// Optional counter incremented on every incoming RPC request.
     rpc_requests_total: Option<Counter>,
+    /// Optional counter incremented on every rate-limited request.
+    rpc_rate_limited: Option<Counter>,
 }
 
 /// Subscription method names that require WebSocket transport.
@@ -313,6 +315,9 @@ where
             match conn_id {
                 Some(id) => {
                     if !limiter.try_acquire(id) {
+                        if let Some(ref c) = self.rpc_rate_limited {
+                            c.inc();
+                        }
                         return Box::pin(std::future::ready(rate_limited_rpc_response(
                             request.id().into_owned(),
                         )));
@@ -330,6 +335,9 @@ where
 
         // --- Global rate limit (backstop) ---
         if !global_rate_limit_allows(&self.global_limiter) {
+            if let Some(ref c) = self.rpc_rate_limited {
+                c.inc();
+            }
             return Box::pin(std::future::ready(rate_limited_rpc_response(
                 request.id().into_owned(),
             )));
@@ -389,6 +397,8 @@ pub struct RpcServer<S: StateProvider = NoopStateProvider> {
     mempool_broadcast: Option<MempoolEventSender>,
     /// Prometheus counter incremented on every incoming JSON-RPC request.
     rpc_requests_total: Option<Counter>,
+    /// Prometheus counter incremented on every rate-limited JSON-RPC request.
+    rpc_rate_limited: Option<Counter>,
 }
 
 impl<S: StateProvider> std::fmt::Debug for RpcServer<S> {
@@ -437,6 +447,7 @@ impl RpcServer<NoopStateProvider> {
             pending_tx_broadcast: None,
             mempool_broadcast: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         }
     }
 
@@ -459,6 +470,7 @@ impl RpcServer<NoopStateProvider> {
             pending_tx_broadcast: None,
             mempool_broadcast: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         }
     }
 }
@@ -488,6 +500,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             pending_tx_broadcast: None,
             mempool_broadcast: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         }
     }
 
@@ -523,6 +536,13 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
     #[must_use]
     pub fn with_rpc_requests_counter(mut self, counter: Counter) -> Self {
         self.rpc_requests_total = Some(counter);
+        self
+    }
+
+    /// Attach a Prometheus counter for tracking rate-limited RPC requests.
+    #[must_use]
+    pub fn with_rpc_rate_limited_counter(mut self, counter: Counter) -> Self {
+        self.rpc_rate_limited = Some(counter);
         self
     }
 
@@ -585,6 +605,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             cors_config: config.cors,
             rate_limit_config: config.rate_limit,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
             max_connections: config.max_connections,
             max_subscriptions_per_connection: config.max_subscriptions_per_connection,
             max_batch_size: config.max_batch_size,
@@ -619,6 +640,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
         let mempool_broadcast = self.mempool_broadcast;
 
         let rpc_requests_total = self.rpc_requests_total;
+        let rpc_rate_limited = self.rpc_rate_limited;
 
         let http_handle = tokio::spawn(async move {
             let app = build_http_router(node_state, cors_layer, max_connections, http_rate_limiter);
@@ -645,6 +667,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
                     per_conn_limiter: rpc_per_conn_limiter.clone(),
                     global_limiter: rpc_global_limiter.clone(),
                     rpc_requests_total: rpc_requests_total.clone(),
+                    rpc_rate_limited: rpc_rate_limited.clone(),
                 });
 
             let server = match Server::builder()
@@ -763,8 +786,32 @@ async fn status_handler(State(state): State<Arc<NodeState>>) -> impl IntoRespons
     (StatusCode::OK, axum::Json(status))
 }
 
-async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
+async fn health_handler(State(state): State<Arc<NodeState>>) -> impl IntoResponse {
+    let status = state.status();
+    if status.is_degraded {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({
+                "status": "degraded",
+                "reason": "consensus stall detected: no block finalized within the stall threshold",
+                "currentView": status.current_view,
+                "finalizedCount": status.finalized_count,
+                "nullifiedCount": status.nullified_count,
+                "peerCount": status.peer_count,
+                "partitionStatus": status.partition_status,
+            })),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "status": "healthy",
+            "currentView": status.current_view,
+            "finalizedCount": status.finalized_count,
+        })),
+    )
+        .into_response()
 }
 
 /// Standalone JSON-RPC server without HTTP status endpoints.
@@ -784,6 +831,8 @@ pub struct JsonRpcServer<S: StateProvider = NoopStateProvider> {
     mempool_broadcast: Option<MempoolEventSender>,
     /// Prometheus counter incremented on every incoming JSON-RPC request.
     rpc_requests_total: Option<Counter>,
+    /// Prometheus counter incremented on every rate-limited JSON-RPC request.
+    rpc_rate_limited: Option<Counter>,
 }
 
 impl<S: StateProvider> std::fmt::Debug for JsonRpcServer<S> {
@@ -821,6 +870,7 @@ impl JsonRpcServer<NoopStateProvider> {
             pending_tx_broadcast: None,
             mempool_broadcast: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         }
     }
 }
@@ -843,6 +893,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
             pending_tx_broadcast: None,
             mempool_broadcast: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         }
     }
 
@@ -885,6 +936,13 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
     #[must_use]
     pub fn with_rpc_requests_counter(mut self, counter: Counter) -> Self {
         self.rpc_requests_total = Some(counter);
+        self
+    }
+
+    /// Attach a Prometheus counter for tracking rate-limited RPC requests.
+    #[must_use]
+    pub fn with_rpc_rate_limited_counter(mut self, counter: Counter) -> Self {
+        self.rpc_rate_limited = Some(counter);
         self
     }
 
@@ -933,12 +991,14 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
         let rpc_global_limiter = SharedRateLimiter::new(self.rate_limit_config.clone());
         let rpc_per_conn_limiter = PerConnectionRateLimiter::new(self.rate_limit_config);
         let rpc_requests_total = self.rpc_requests_total;
+        let rpc_rate_limited = self.rpc_rate_limited;
         let rpc_middleware =
             RpcServiceBuilder::new().layer_fn(move |service| RateLimitedRpcService {
                 service,
                 per_conn_limiter: rpc_per_conn_limiter.clone(),
                 global_limiter: rpc_global_limiter.clone(),
                 rpc_requests_total: rpc_requests_total.clone(),
+                rpc_rate_limited: rpc_rate_limited.clone(),
             });
 
         let server = Server::builder()
@@ -1159,6 +1219,7 @@ mod tests {
             per_conn_limiter: per_conn,
             global_limiter: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         };
 
         let first = service.call(rpc_request_with_conn(1, 42)).await;
@@ -1181,6 +1242,7 @@ mod tests {
             per_conn_limiter: per_conn,
             global_limiter: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         };
 
         // Connection 1: exhaust its bucket.
@@ -1205,6 +1267,7 @@ mod tests {
             per_conn_limiter: None,
             global_limiter: global,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         };
 
         let first = service.call(rpc_request_with_conn(1, 1)).await;
@@ -1248,6 +1311,7 @@ mod tests {
             per_conn_limiter: None,
             global_limiter: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         };
 
         // eth_subscribe should be rewritten from -32603 to -32004.
@@ -1266,6 +1330,7 @@ mod tests {
             per_conn_limiter: None,
             global_limiter: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         };
 
         let sub_req = RpcRequest::new(Cow::Borrowed("eth_subscribe"), None, Id::Number(1));
@@ -1281,6 +1346,7 @@ mod tests {
             per_conn_limiter: None,
             global_limiter: None,
             rpc_requests_total: None,
+            rpc_rate_limited: None,
         };
 
         let req = rpc_request(1);
@@ -1311,5 +1377,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok_when_healthy() {
+        let state = Arc::new(NodeState::new(1, 0));
+        let app = build_http_router(state, build_cors_layer(&CorsConfig::none()), 10, None);
+        let resp = app
+            .oneshot(HttpRequest::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_returns_503_when_degraded() {
+        let state = Arc::new(NodeState::new(1, 0));
+        state.set_degraded(true);
+        let app = build_http_router(state, build_cors_layer(&CorsConfig::none()), 10, None);
+        let resp = app
+            .oneshot(HttpRequest::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

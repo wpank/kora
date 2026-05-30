@@ -74,6 +74,11 @@ const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the stall detector polls the finalization counter.
+const STALL_DETECTION_INTERVAL: Duration = Duration::from_secs(10);
+/// Number of seconds without a new finalized block while views are advancing
+/// before the node is marked degraded.
+const STALL_THRESHOLD_SECS: u64 = 30;
 const RUNTIME_DIR_ENV: &str = "KORA_RUNTIME_DIR";
 const CHECKPOINT_INTERVAL_ENV: &str = "KORA_CHECKPOINT_INTERVAL";
 const DEFAULT_CHECKPOINT_INTERVAL: u64 = 256;
@@ -726,6 +731,60 @@ fn mark_seen(seen: &SeenSet, hash: B256) -> bool {
     set.insert(hash)
 }
 
+/// Detect consensus stalls and mark the node as degraded.
+///
+/// Polls the finalization counter every [`STALL_DETECTION_INTERVAL`].  When
+/// views are advancing (`current_view > 0`) but no new blocks have been
+/// finalized for at least [`STALL_THRESHOLD_SECS`], the node is flagged
+/// degraded via [`kora_rpc::NodeState::set_degraded`].  The degraded flag
+/// causes the `/health` endpoint to return `503 Service Unavailable`,
+/// enabling load balancers and Docker healthchecks to detect the stall
+/// automatically.
+///
+/// When finalization resumes, the degraded flag is cleared and an `info`
+/// log is emitted.
+fn spawn_stall_detector(node_state: kora_rpc::NodeState, context: cw_tokio::Context) {
+    context.child("stall_detector").shared(false).spawn(move |ctx| async move {
+        let mut last_finalized: u64 = 0;
+        let mut stall_start: Option<std::time::Instant> = None;
+
+        loop {
+            ctx.sleep(STALL_DETECTION_INTERVAL).await;
+            let status = node_state.status();
+
+            if status.finalized_count > last_finalized {
+                // Finalization is making progress â reset the stall timer.
+                last_finalized = status.finalized_count;
+                if stall_start.is_some() {
+                    info!(
+                        finalized_count = status.finalized_count,
+                        "consensus resumed: finalization progressing again"
+                    );
+                    node_state.set_degraded(false);
+                }
+                stall_start = None;
+            } else if status.current_view > 0 {
+                // Views are advancing but finalization is not.
+                let start = stall_start.get_or_insert_with(std::time::Instant::now);
+                let elapsed_secs = start.elapsed().as_secs();
+
+                if elapsed_secs >= STALL_THRESHOLD_SECS {
+                    warn!(
+                        stall_secs = elapsed_secs,
+                        last_finalized = status.finalized_count,
+                        current_view = status.current_view,
+                        nullified = status.nullified_count,
+                        "CONSENSUS STALL: no finalization for {}s -- \
+                         possible network partition or insufficient quorum",
+                        elapsed_secs,
+                    );
+                    node_state.set_degraded(true);
+                }
+            }
+        }
+    });
+}
+
 /// Periodically check peer connectivity and log warnings when the network
 /// appears degraded or partitioned.
 ///
@@ -1261,6 +1320,7 @@ impl NodeRunner for ProductionRunner {
             let _rpc_handle = rpc.start();
             info!(addr = %addr, "RPC server started with live state provider");
 
+            spawn_stall_detector(node_state.clone(), context.child("stall"));
             spawn_partition_monitor(node_state.clone(), context.child("partition"));
         }
 

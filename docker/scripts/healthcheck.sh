@@ -51,6 +51,18 @@ case "$MODE" in
         nc -z localhost 30303
         ;;
     ready)
+        # Step 0: Check the /health endpoint on the HTTP status server (port 8546).
+        # Returns 503 when the stall detector has flagged the node as degraded.
+        # This check is fast and provides an immediate signal for load balancers
+        # and Docker orchestrators without requiring JSON parsing.
+        HTTP_PORT="${HEALTH_HTTP_PORT:-8546}"
+        HTTP_STATUS=$(curl -o /dev/null -sw "%{http_code}" --max-time "$RPC_TIMEOUT" \
+            "http://localhost:${HTTP_PORT}/health" 2>/dev/null) || HTTP_STATUS="000"
+        if [[ "$HTTP_STATUS" == "503" ]]; then
+            echo "UNHEALTHY: /health returned 503 (consensus stall detected)" >&2
+            exit 1
+        fi
+
         # Step 1: Verify the RPC server responds to eth_blockNumber.
         # Use --max-time to enforce our own timeout rather than relying on
         # curl's default (which interacts poorly with Docker's health check
