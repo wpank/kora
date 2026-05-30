@@ -73,6 +73,7 @@ impl NodeConfig {
         if self.worker_threads == 0 {
             return Err(ConfigError::InvalidValue("worker_threads must be >= 1".to_string()));
         }
+        self.consensus.resharing.validate()?;
         Ok(())
     }
 
@@ -251,6 +252,27 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "worker_threads = 0\n").unwrap();
         assert!(NodeConfig::load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn test_load_rejects_enabled_resharing_until_implemented() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[consensus.resharing]\nenabled = true\n").unwrap();
+
+        let err = NodeConfig::load(Some(&path)).expect_err("resharing is not implemented");
+
+        assert!(err.to_string().contains("consensus.resharing.enabled"));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_resharing_epoch_length() {
+        let mut config = NodeConfig::default();
+        config.consensus.resharing.epoch_length = 0;
+
+        let err = config.validate().expect_err("epoch length must be non-zero");
+
+        assert!(err.to_string().contains("consensus.resharing.epoch_length"));
     }
 
     #[test]

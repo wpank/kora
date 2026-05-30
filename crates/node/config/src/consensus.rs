@@ -154,22 +154,20 @@ impl Default for ConsensusSimplexConfig {
 /// Configuration for DKG resharing and dynamic validator set management.
 ///
 /// When `enabled` is `false` (the default), the validator set is fixed at genesis
-/// and the epoch length is effectively infinite. When `enabled` is `true`, the
-/// node will participate in periodic resharing ceremonies at epoch boundaries to
-/// rotate threshold key shares and allow validator set changes.
+/// and the consensus epoch length is effectively infinite. Enabling resharing is
+/// rejected by config validation until the protocol and runtime integration are
+/// implemented.
 ///
-/// **Status: stub -- resharing is not yet implemented.** Enabling this field
-/// currently has no effect beyond signaling intent. See issue #103 for the
+/// **Status: stub -- resharing is not yet implemented.** See issue #103 for the
 /// full design and tracking.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResharingConfig {
     /// Whether DKG resharing is enabled.
     ///
     /// When `false` (default), the validator set is permanently fixed at genesis
-    /// and `EPOCH_LENGTH` remains `u64::MAX`. When `true`, epoch-based resharing
-    /// ceremonies will be triggered at `epoch_length` block intervals.
+    /// and consensus uses an infinite epoch length.
     ///
-    /// **Not yet implemented.** See issue #103.
+    /// **Not yet implemented.** Config validation rejects `true`. See issue #103.
     #[serde(default)]
     pub enabled: bool,
 
@@ -195,6 +193,31 @@ impl Default for ResharingConfig {
             epoch_length: DEFAULT_RESHARING_EPOCH_LENGTH,
             cooldown_blocks: DEFAULT_RESHARING_COOLDOWN_BLOCKS,
         }
+    }
+}
+
+impl ResharingConfig {
+    /// Validate resharing settings.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.epoch_length == 0 {
+            return Err(ConfigError::InvalidValue(
+                "consensus.resharing.epoch_length must be >= 1".to_string(),
+            ));
+        }
+
+        if self.enabled {
+            return Err(ConfigError::InvalidValue(
+                "consensus.resharing.enabled is not supported until DKG resharing is implemented"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Effective consensus epoch length for the currently implemented static validator set.
+    pub const fn consensus_epoch_length(&self) -> NonZeroU64 {
+        NonZeroU64::new(u64::MAX).expect("u64::MAX is non-zero")
     }
 }
 
@@ -643,5 +666,30 @@ mod tests {
         assert!(config.resharing.enabled);
         assert_eq!(config.resharing.epoch_length, 7200);
         assert_eq!(config.resharing.cooldown_blocks, DEFAULT_RESHARING_COOLDOWN_BLOCKS);
+    }
+
+    #[test]
+    fn resharing_validate_rejects_enabled_until_implemented() {
+        let config = ResharingConfig { enabled: true, ..Default::default() };
+
+        let err = config.validate().expect_err("enabled resharing is not implemented");
+
+        assert!(err.to_string().contains("not supported"));
+    }
+
+    #[test]
+    fn resharing_validate_rejects_zero_epoch_length() {
+        let config = ResharingConfig { epoch_length: 0, ..Default::default() };
+
+        let err = config.validate().expect_err("epoch length must be non-zero");
+
+        assert!(err.to_string().contains("epoch_length"));
+    }
+
+    #[test]
+    fn resharing_consensus_epoch_length_is_static_until_supported() {
+        let config = ResharingConfig::default();
+
+        assert_eq!(config.consensus_epoch_length().get(), u64::MAX);
     }
 }

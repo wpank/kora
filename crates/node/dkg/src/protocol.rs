@@ -96,7 +96,7 @@ fn compute_message_hash(bytes: &[u8]) -> [u8; 32] {
 use crate::{DkgConfig, DkgError, DkgOutput, DkgPhase, PersistedDkgState};
 
 /// Inner message types for the DKG protocol (without session binding).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ProtocolMessageKind {
     /// Public commitment from a dealer to all players.
     DealerPublic {
@@ -138,6 +138,37 @@ pub enum ProtocolMessageKind {
         /// The player's public key.
         player: ed25519::PublicKey,
     },
+}
+
+impl std::fmt::Debug for ProtocolMessageKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DealerPublic { dealer, .. } => f
+                .debug_struct("DealerPublic")
+                .field("dealer", dealer)
+                .field("msg", &"<public commitment>")
+                .finish(),
+            Self::DealerPrivate { dealer, .. } => f
+                .debug_struct("DealerPrivate")
+                .field("dealer", dealer)
+                .field("msg", &"<redacted private share>")
+                .finish(),
+            Self::PlayerAck { player, dealer, .. } => f
+                .debug_struct("PlayerAck")
+                .field("player", player)
+                .field("dealer", dealer)
+                .field("ack", &"<ack>")
+                .finish(),
+            Self::DealerLog { .. } => {
+                f.debug_struct("DealerLog").field("log", &"<dealer log>").finish()
+            }
+            Self::RequestLogs => f.write_str("RequestLogs"),
+            Self::AllLogs { logs } => {
+                f.debug_struct("AllLogs").field("logs_count", &logs.len()).finish()
+            }
+            Self::Ready { player } => f.debug_struct("Ready").field("player", player).finish(),
+        }
+    }
 }
 
 /// Message envelope that wraps protocol messages with session binding.

@@ -1,4 +1,4 @@
-use std::{io::Write as _, path::Path};
+use std::{fmt, io::Write as _, path::Path};
 
 use commonware_utils::{Faults, N3f1};
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use crate::DkgError;
 /// same across epochs, but the shares (`share_secret`, `share_index`) and
 /// `participant_keys` will change to reflect the new validator set. An `epoch`
 /// field will be added to track which resharing round produced this output.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DkgOutput {
     /// The aggregated group public key derived from all participants' contributions.
     pub group_public_key: Vec<u8>,
@@ -36,6 +36,20 @@ pub struct DkgOutput {
     pub participant_keys: Vec<Vec<u8>>,
 }
 
+impl fmt::Debug for DkgOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DkgOutput")
+            .field("group_public_key_len", &self.group_public_key.len())
+            .field("public_polynomial_len", &self.public_polynomial.len())
+            .field("threshold", &self.threshold)
+            .field("participants", &self.participants)
+            .field("share_index", &self.share_index)
+            .field("share_secret", &"<redacted>")
+            .field("participant_keys_len", &self.participant_keys.len())
+            .finish()
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct OutputJson {
     group_public_key: String,
@@ -55,8 +69,41 @@ struct ShareJson {
 }
 
 impl DkgOutput {
+    /// Validate persisted DKG output invariants that must hold before using key shares.
+    pub fn validate(&self) -> Result<(), DkgError> {
+        if self.participants == 0 {
+            return Err(DkgError::InvalidParticipantCount { expected: 1, actual: 0 });
+        }
+
+        let expected_threshold = N3f1::quorum(self.participants);
+        if self.threshold != expected_threshold {
+            return Err(DkgError::InvalidThreshold {
+                threshold: self.threshold,
+                participants: self.participants,
+            });
+        }
+
+        if self.share_index as usize >= self.participants {
+            return Err(DkgError::CeremonyFailed(format!(
+                "share index {} is outside participant set of size {}",
+                self.share_index, self.participants
+            )));
+        }
+
+        if !self.participant_keys.is_empty() && self.participant_keys.len() != self.participants {
+            return Err(DkgError::InvalidParticipantCount {
+                expected: self.participants,
+                actual: self.participant_keys.len(),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Persists the DKG output to `output.json` and the secret share to `share.key` in `data_dir`.
     pub fn save(&self, data_dir: &Path) -> Result<(), DkgError> {
+        self.validate()?;
+
         let output_json = OutputJson {
             group_public_key: hex::encode(&self.group_public_key),
             public_polynomial: hex::encode(&self.public_polynomial),
@@ -98,11 +145,15 @@ impl DkgOutput {
             .map(|k| hex::decode(k).map_err(|e| DkgError::Serialization(e.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
 
+        if output.participants == 0 {
+            return Err(DkgError::InvalidParticipantCount { expected: 1, actual: 0 });
+        }
+
         // Always compute the correct quorum from N3f1 rather than trusting
         // the persisted threshold value, which may be wrong in old output files.
         let correct_threshold = N3f1::quorum(output.participants);
 
-        Ok(Self {
+        let output = Self {
             group_public_key: hex::decode(&output.group_public_key)
                 .map_err(|e| DkgError::Serialization(e.to_string()))?,
             public_polynomial: hex::decode(&output.public_polynomial)
@@ -113,7 +164,9 @@ impl DkgOutput {
             share_secret: hex::decode(&share.secret)
                 .map_err(|e| DkgError::Serialization(e.to_string()))?,
             participant_keys,
-        })
+        };
+        output.validate()?;
+        Ok(output)
     }
 
     /// Returns `true` if both `output.json` and `share.key` exist in `data_dir`.
@@ -138,5 +191,49 @@ fn write_secret_file(path: &Path, data: &[u8]) -> Result<(), DkgError> {
 impl From<serde_json::Error> for DkgError {
     fn from(e: serde_json::Error) -> Self {
         Self::Serialization(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_output() -> DkgOutput {
+        DkgOutput {
+            group_public_key: vec![0xab],
+            public_polynomial: vec![0xcd],
+            threshold: N3f1::quorum(4),
+            participants: 4,
+            share_index: 1,
+            share_secret: vec![7, 8, 9, 10],
+            participant_keys: vec![vec![1], vec![2], vec![3], vec![4]],
+        }
+    }
+
+    #[test]
+    fn debug_redacts_share_secret() {
+        let output = valid_output();
+        let debug = format!("{output:?}");
+
+        assert!(debug.contains("share_secret: \"<redacted>\""));
+        assert!(!debug.contains("7, 8, 9, 10"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_share_index() {
+        let mut output = valid_output();
+        output.share_index = output.participants as u32;
+
+        let err = output.validate().expect_err("share index must be in participant set");
+        assert!(err.to_string().contains("share index"));
+    }
+
+    #[test]
+    fn validate_rejects_participant_key_mismatch() {
+        let mut output = valid_output();
+        output.participant_keys.pop();
+
+        let err = output.validate().expect_err("participant key count must match");
+        assert!(matches!(err, DkgError::InvalidParticipantCount { expected: 4, actual: 3 }));
     }
 }

@@ -33,7 +33,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, tokio as cw_tokio,
 };
 use commonware_storage::archive::{Archive, Identifier as ArchiveId};
-use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
+use commonware_utils::{NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
 use kora_consensus::BlockExecution;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
@@ -70,13 +70,6 @@ impl kora_metrics::MetricsRegister for RuntimeMetrics<'_> {
     }
 }
 
-// TODO(#103): Replace this hardcoded infinite epoch length with a configurable
-// value from `ConsensusConfig::resharing::epoch_length` when DKG resharing is
-// implemented. When `resharing.enabled` is true, this should use the configured
-// epoch length to trigger periodic resharing ceremonies at epoch boundaries.
-// When resharing is disabled (the default), this should remain `u64::MAX` so
-// that the validator set is permanently fixed at genesis.
-const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -1386,7 +1379,7 @@ impl NodeRunner for ProductionRunner {
             .await;
         let marshal_handle = actor.start(finalized_reporter, buffer, resolver);
 
-        let epocher = FixedEpocher::new(NZU64!(EPOCH_LENGTH));
+        let epocher = FixedEpocher::new(config.consensus.resharing.consensus_epoch_length());
         let executor = RevmExecutor::new(self.chain_id);
         let mut app = RevmApplication::<ThresholdScheme, _>::new(
             ledger.clone(),

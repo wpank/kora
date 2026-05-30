@@ -76,6 +76,42 @@ pub struct ResharingOutput {
     pub new_participants: Vec<Vec<u8>>,
 }
 
+impl ResharingOutput {
+    /// Build a resharing output after checking the invariants required by a valid ceremony.
+    ///
+    /// Resharing must preserve the group public key while moving to exactly the
+    /// participant set represented by the new DKG output.
+    pub fn new(
+        epoch: u64,
+        previous_output: &DkgOutput,
+        dkg_output: DkgOutput,
+        new_participants: Vec<Vec<u8>>,
+    ) -> Result<Self, DkgError> {
+        dkg_output.validate()?;
+
+        if dkg_output.group_public_key != previous_output.group_public_key {
+            return Err(DkgError::CeremonyFailed(
+                "resharing output changed the group public key".to_string(),
+            ));
+        }
+
+        if dkg_output.participants != new_participants.len() {
+            return Err(DkgError::InvalidParticipantCount {
+                expected: dkg_output.participants,
+                actual: new_participants.len(),
+            });
+        }
+
+        if dkg_output.participant_keys != new_participants {
+            return Err(DkgError::CeremonyFailed(
+                "resharing output participant keys do not match the new validator set".to_string(),
+            ));
+        }
+
+        Ok(Self { epoch, dkg_output, new_participants })
+    }
+}
+
 /// Trait for DKG resharing coordination.
 ///
 /// Implementors manage the lifecycle of resharing ceremonies, including
@@ -141,7 +177,21 @@ impl Resharing for NoopResharing {
 
 #[cfg(test)]
 mod tests {
+    use commonware_utils::Faults as _;
+
     use super::*;
+
+    fn dkg_output(group_public_key: Vec<u8>, participant_keys: Vec<Vec<u8>>) -> DkgOutput {
+        DkgOutput {
+            group_public_key,
+            public_polynomial: vec![0xcd],
+            threshold: commonware_utils::N3f1::quorum(participant_keys.len()),
+            participants: participant_keys.len(),
+            share_index: 0,
+            share_secret: vec![9, 8, 7],
+            participant_keys,
+        }
+    }
 
     #[test]
     fn noop_resharing_never_triggers() {
@@ -185,19 +235,50 @@ mod tests {
     fn resharing_output_debug() {
         let output = ResharingOutput {
             epoch: 42,
-            dkg_output: DkgOutput {
-                group_public_key: vec![0xab],
-                public_polynomial: vec![],
-                threshold: 3,
-                participants: 4,
-                share_index: 1,
-                share_secret: vec![],
-                participant_keys: vec![],
-            },
+            dkg_output: dkg_output(vec![0xab], vec![vec![1], vec![2], vec![3], vec![4]]),
             new_participants: vec![vec![1], vec![2]],
         };
         let debug = format!("{:?}", output);
         assert!(debug.contains("ResharingOutput"));
         assert!(debug.contains("epoch: 42"));
+        assert!(debug.contains("share_secret: \"<redacted>\""));
+        assert!(!debug.contains("9, 8, 7"));
+    }
+
+    #[test]
+    fn resharing_output_new_preserves_group_key_and_participants() {
+        let previous = dkg_output(vec![0xab], vec![vec![1], vec![2], vec![3], vec![4]]);
+        let next_participants = vec![vec![5], vec![6], vec![7], vec![8]];
+        let next = dkg_output(vec![0xab], next_participants.clone());
+
+        let output = ResharingOutput::new(7, &previous, next, next_participants.clone())
+            .expect("valid resharing output");
+
+        assert_eq!(output.epoch, 7);
+        assert_eq!(output.new_participants, next_participants);
+        assert_eq!(output.dkg_output.group_public_key, previous.group_public_key);
+    }
+
+    #[test]
+    fn resharing_output_new_rejects_group_key_change() {
+        let previous = dkg_output(vec![0xab], vec![vec![1], vec![2], vec![3], vec![4]]);
+        let next_participants = vec![vec![5], vec![6], vec![7], vec![8]];
+        let next = dkg_output(vec![0xef], next_participants.clone());
+
+        let err = ResharingOutput::new(7, &previous, next, next_participants)
+            .expect_err("resharing must preserve group key");
+
+        assert!(err.to_string().contains("group public key"));
+    }
+
+    #[test]
+    fn resharing_output_new_rejects_participant_mismatch() {
+        let previous = dkg_output(vec![0xab], vec![vec![1], vec![2], vec![3], vec![4]]);
+        let next = dkg_output(vec![0xab], vec![vec![5], vec![6], vec![7], vec![8]]);
+
+        let err = ResharingOutput::new(7, &previous, next, vec![vec![5], vec![6], vec![7]])
+            .expect_err("participant set must match DKG output");
+
+        assert!(matches!(err, DkgError::InvalidParticipantCount { expected: 4, actual: 3 }));
     }
 }
